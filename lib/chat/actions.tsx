@@ -1,40 +1,40 @@
 import 'server-only'
 
+import { openai } from '@ai-sdk/openai'
 import {
   createAI,
   createStreamableUI,
-  getMutableAIState,
+  createStreamableValue,
   getAIState,
-  streamUI,
-  createStreamableValue
+  getMutableAIState,
+  streamUI
 } from 'ai/rsc'
-import { openai } from '@ai-sdk/openai'
 
 import {
-  spinner,
   BotCard,
   BotMessage,
   SystemMessage,
-  Stock,
-  Purchase
+  spinner
 } from '@/components/stocks'
 
-import { z } from 'zod'
+import { saveChat } from '@/app/actions'
+import { auth } from '@/auth'
+import AccountsBalance from '@/components/balance/accounts-balance'
+import BillConfirm from '@/components/balance/bill-confirm'
+import SendConfirm from '@/components/balance/send-confirm'
+import TransactionHistory from '@/components/balance/transaction-history'
 import { EventsSkeleton } from '@/components/stocks/events-skeleton'
-import { Events } from '@/components/stocks/events'
-import { StocksSkeleton } from '@/components/stocks/stocks-skeleton'
-import { Stocks } from '@/components/stocks/stocks'
+import { SpinnerMessage, UserMessage } from '@/components/stocks/message'
 import { StockSkeleton } from '@/components/stocks/stock-skeleton'
+import { StocksSkeleton } from '@/components/stocks/stocks-skeleton'
+import { Chat, Message } from '@/lib/types'
 import {
   formatNumber,
+  nanoid,
   runAsyncFnWithoutBlocking,
-  sleep,
-  nanoid
+  sleep
 } from '@/lib/utils'
-import { saveChat } from '@/app/actions'
-import { SpinnerMessage, UserMessage } from '@/components/stocks/message'
-import { Chat, Message } from '@/lib/types'
-import { auth } from '@/auth'
+import { z } from 'zod'
 
 async function confirmPurchase(symbol: string, price: number, amount: number) {
   'use server'
@@ -130,19 +130,24 @@ async function submitUserMessage(content: string) {
     model: openai('gpt-3.5-turbo'),
     initial: <SpinnerMessage />,
     system: `\
-    You are a stock trading conversation bot and you can help users buy stocks, step by step.
-    You and the user can discuss stock prices and the user can adjust the amount of stocks they want to buy, or place an order, in the UI.
-    
+    You are a conversation bot that can help users manage their finances, step by step.
+    You and the user can discuss the user's financial condition and the user can perform financial transactions using the User Interface.
+
     Messages inside [] means that it's a UI element or a user event. For example:
-    - "[Price of AAPL = 100]" means that an interface of the stock price of AAPL is shown to the user.
-    - "[User has changed the amount of AAPL to 10]" means that the user has changed the amount of AAPL to 10 in the UI.
+    - "[User sent Rp. 10.000 to Alice]" means that user has confirmed the transfer request of Rp. 10.000 to Alice.
+    - "[User paid Rp. 100.000 of PLN]" means that user has confirmed the pay bill request of Rp. 100.000 to PLN.
     
-    If the user requests purchasing a stock, call \`show_stock_purchase_ui\` to show the purchase UI.
-    If the user just wants the price, call \`show_stock_price\` to show the price.
-    If you want to show trending stocks, call \`list_stocks\`.
-    If you want to show events, call \`get_events\`.
-    If the user wants to sell stock, or complete another impossible task, respond that you are a demo and cannot do that.
-    
+    If the user requests sending money, you should ask for their confirmation. call \`send_money\` to show the confirmation UI.
+    If the user requests paying a bill, call \`pay_bill\` to show the pay bill UI.
+    If you want to show the user's account balance, call \`get_balance\`.
+    If you want to show the user's transaction history, call \`get_transaction_history\`.
+    If the user wants to create a loan or complete another impossible task, respond that you are a demo and cannot do that.
+
+    Here are some assumptions that must be followed:
+    - Possible accounts name are and only are: "BRI", "BCA", "Mandiri" concatenated with their purpose, such as "Savings", "Payroll", "Investments".
+    - Possible billers are an only are: "PLN", "Telkom", "Indihome", "Credit Card".
+
+    Every amount of money has to be represented in Indonesian Rupiah Currency (Rp.), use . (dot) as thousand separator.
     Besides that, you can also chat with users and do some calculations if needed.`,
     messages: [
       ...aiState.get().messages.map((message: any) => ({
@@ -177,18 +182,22 @@ async function submitUserMessage(content: string) {
       return textNode
     },
     tools: {
-      listStocks: {
-        description: 'List three imaginary stocks that are trending.',
+      getBalance: {
+        description: `Show imaginary user's 2 accounts and their balances.`,
         parameters: z.object({
-          stocks: z.array(
+          accountsBalance: z.array(
             z.object({
-              symbol: z.string().describe('The symbol of the stock'),
-              price: z.number().describe('The price of the stock'),
-              delta: z.number().describe('The change in price of the stock')
+              account: z.object({
+                name: z.string().describe('The account name'),
+                number: z.string().describe('The account number')
+              }),
+              balance: z
+                .string()
+                .describe('The balance of the account, formatted as a currency')
             })
           )
         }),
-        generate: async function* ({ stocks }) {
+        generate: async function* ({ accountsBalance }) {
           yield (
             <BotCard>
               <StocksSkeleton />
@@ -209,9 +218,9 @@ async function submitUserMessage(content: string) {
                 content: [
                   {
                     type: 'tool-call',
-                    toolName: 'listStocks',
+                    toolName: 'getBalance',
                     toolCallId,
-                    args: { stocks }
+                    args: { accountsBalance }
                   }
                 ]
               },
@@ -221,9 +230,9 @@ async function submitUserMessage(content: string) {
                 content: [
                   {
                     type: 'tool-result',
-                    toolName: 'listStocks',
+                    toolName: 'getBalance',
                     toolCallId,
-                    result: stocks
+                    result: accountsBalance
                   }
                 ]
               }
@@ -232,24 +241,38 @@ async function submitUserMessage(content: string) {
 
           return (
             <BotCard>
-              <Stocks props={stocks} />
+              <AccountsBalance props={accountsBalance} />
             </BotCard>
           )
         }
       },
-      showStockPrice: {
-        description:
-          'Get the current stock price of a given stock or currency. Use this to show the price to the user.',
+      sendMoney: {
+        description: `Use this to ask for user's confirmation when sending/transfering money.`,
         parameters: z.object({
-          symbol: z
+          sourceAccount: z.object({
+            name: z.string().describe('The source account name'),
+            number: z.string().describe('The source account number'),
+            holder: z.string().describe('The source account holder')
+          }),
+          destinationAccount: z.object({
+            name: z.string().describe('The destination account name'),
+            number: z.string().describe('The destination account number'),
+            holder: z.string().describe('The destination account holder')
+          }),
+          amount: z
             .string()
-            .describe(
-              'The name or symbol of the stock or currency. e.g. DOGE/AAPL/USD.'
-            ),
-          price: z.number().describe('The price of the stock.'),
-          delta: z.number().describe('The change in price of the stock')
+            .describe('The amount of money to send, formatted as a currency'),
+          remarks: z
+            .string()
+            .optional()
+            .describe('The remarks of the transaction')
         }),
-        generate: async function* ({ symbol, price, delta }) {
+        generate: async function* ({
+          sourceAccount,
+          destinationAccount,
+          amount,
+          remarks
+        }) {
           yield (
             <BotCard>
               <StockSkeleton />
@@ -270,9 +293,9 @@ async function submitUserMessage(content: string) {
                 content: [
                   {
                     type: 'tool-call',
-                    toolName: 'showStockPrice',
+                    toolName: 'sendMoney',
                     toolCallId,
-                    args: { symbol, price, delta }
+                    args: { sourceAccount, destinationAccount, amount, remarks }
                   }
                 ]
               },
@@ -282,9 +305,14 @@ async function submitUserMessage(content: string) {
                 content: [
                   {
                     type: 'tool-result',
-                    toolName: 'showStockPrice',
+                    toolName: 'sendMoney',
                     toolCallId,
-                    result: { symbol, price, delta }
+                    result: {
+                      sourceAccount,
+                      destinationAccount,
+                      amount,
+                      remarks
+                    }
                   }
                 ]
               }
@@ -293,135 +321,96 @@ async function submitUserMessage(content: string) {
 
           return (
             <BotCard>
-              <Stock props={{ symbol, price, delta }} />
+              <SendConfirm
+                props={{ sourceAccount, destinationAccount, amount, remarks }}
+              />
             </BotCard>
           )
         }
       },
-      showStockPurchase: {
-        description:
-          'Show price and the UI to purchase a stock or currency. Use this if the user wants to purchase a stock or currency.',
+      payBill: {
+        description: `Use this to ask for user's confirmation when paying bills.`,
         parameters: z.object({
-          symbol: z
+          billing: z.object({
+            name: z.string().describe('The biller name'),
+            number: z.string().describe('The billing number')
+          }),
+          account: z.object({
+            name: z.string().describe('The account name'),
+            number: z.string().describe('The account number'),
+            holder: z.string().describe('The account holder')
+          }),
+          amount: z
             .string()
-            .describe(
-              'The name or symbol of the stock or currency. e.g. DOGE/AAPL/USD.'
-            ),
-          price: z.number().describe('The price of the stock.'),
-          numberOfShares: z
-            .number()
-            .describe(
-              'The **number of shares** for a stock or currency to purchase. Can be optional if the user did not specify it.'
-            )
+            .describe('The amount of money to pay, formatted as a currency')
         }),
-        generate: async function* ({ symbol, price, numberOfShares = 100 }) {
+        generate: async function* ({ billing, account, amount }) {
+          yield (
+            <BotCard>
+              <StockSkeleton />
+            </BotCard>
+          )
+
+          await sleep(1000)
+
           const toolCallId = nanoid()
 
-          if (numberOfShares <= 0 || numberOfShares > 1000) {
-            aiState.done({
-              ...aiState.get(),
-              messages: [
-                ...aiState.get().messages,
-                {
-                  id: nanoid(),
-                  role: 'assistant',
-                  content: [
-                    {
-                      type: 'tool-call',
-                      toolName: 'showStockPurchase',
-                      toolCallId,
-                      args: { symbol, price, numberOfShares }
-                    }
-                  ]
-                },
-                {
-                  id: nanoid(),
-                  role: 'tool',
-                  content: [
-                    {
-                      type: 'tool-result',
-                      toolName: 'showStockPurchase',
-                      toolCallId,
-                      result: {
-                        symbol,
-                        price,
-                        numberOfShares,
-                        status: 'expired'
-                      }
-                    }
-                  ]
-                },
-                {
-                  id: nanoid(),
-                  role: 'system',
-                  content: `[User has selected an invalid amount]`
-                }
-              ]
-            })
+          aiState.done({
+            ...aiState.get(),
+            messages: [
+              ...aiState.get().messages,
+              {
+                id: nanoid(),
+                role: 'assistant',
+                content: [
+                  {
+                    type: 'tool-call',
+                    toolName: 'payBill',
+                    toolCallId,
+                    args: { billing, account, amount }
+                  }
+                ]
+              },
+              {
+                id: nanoid(),
+                role: 'tool',
+                content: [
+                  {
+                    type: 'tool-result',
+                    toolName: 'payBill',
+                    toolCallId,
+                    result: { billing, account, amount }
+                  }
+                ]
+              }
+            ]
+          })
 
-            return <BotMessage content={'Invalid amount'} />
-          } else {
-            aiState.done({
-              ...aiState.get(),
-              messages: [
-                ...aiState.get().messages,
-                {
-                  id: nanoid(),
-                  role: 'assistant',
-                  content: [
-                    {
-                      type: 'tool-call',
-                      toolName: 'showStockPurchase',
-                      toolCallId,
-                      args: { symbol, price, numberOfShares }
-                    }
-                  ]
-                },
-                {
-                  id: nanoid(),
-                  role: 'tool',
-                  content: [
-                    {
-                      type: 'tool-result',
-                      toolName: 'showStockPurchase',
-                      toolCallId,
-                      result: {
-                        symbol,
-                        price,
-                        numberOfShares
-                      }
-                    }
-                  ]
-                }
-              ]
-            })
-
-            return (
-              <BotCard>
-                <Purchase
-                  props={{
-                    numberOfShares,
-                    symbol,
-                    price: +price,
-                    status: 'requires_action'
-                  }}
-                />
-              </BotCard>
-            )
-          }
+          return (
+            <BotCard>
+              <BillConfirm props={{ billing, account, amount }} />
+            </BotCard>
+          )
         }
       },
-      getEvents: {
+      getTransactionHistory: {
         description:
-          'List funny imaginary events between user highlighted dates that describe stock activity.',
+          'List 5 items of imaginary funny imaginary transaction history, in and out.',
         parameters: z.object({
           events: z.array(
             z.object({
               date: z
                 .string()
                 .describe('The date of the event, in ISO-8601 format'),
-              headline: z.string().describe('The headline of the event'),
-              description: z.string().describe('The description of the event')
+              actor: z
+                .string()
+                .describe('The actor of the event, recipient or sender'),
+              amount: z
+                .string()
+                .describe('The amount of transaction, formatted as a currency'),
+              type: z
+                .enum(['in', 'out'])
+                .describe('The type of the transaction')
             })
           )
         }),
@@ -446,7 +435,7 @@ async function submitUserMessage(content: string) {
                 content: [
                   {
                     type: 'tool-call',
-                    toolName: 'getEvents',
+                    toolName: 'getTransactionHistory',
                     toolCallId,
                     args: { events }
                   }
@@ -458,9 +447,9 @@ async function submitUserMessage(content: string) {
                 content: [
                   {
                     type: 'tool-result',
-                    toolName: 'getEvents',
+                    toolName: 'getTransactionHistory',
                     toolCallId,
-                    result: events
+                    result: { events }
                   }
                 ]
               }
@@ -469,7 +458,7 @@ async function submitUserMessage(content: string) {
 
           return (
             <BotCard>
-              <Events props={events} />
+              <TransactionHistory props={events} />
             </BotCard>
           )
         }
@@ -555,26 +544,26 @@ export const getUIStateFromAIState = (aiState: Chat) => {
       display:
         message.role === 'tool' ? (
           message.content.map(tool => {
-            return tool.toolName === 'listStocks' ? (
+            return tool.toolName === 'getBalance' ? (
               <BotCard>
                 {/* TODO: Infer types based on the tool result*/}
                 {/* @ts-expect-error */}
-                <Stocks props={tool.result} />
+                <AccountsBalance props={tool.result} />
               </BotCard>
-            ) : tool.toolName === 'showStockPrice' ? (
+            ) : tool.toolName === 'sendMoney' ? (
               <BotCard>
                 {/* @ts-expect-error */}
-                <Stock props={tool.result} />
+                <SendConfirm props={tool.result} />
               </BotCard>
-            ) : tool.toolName === 'showStockPurchase' ? (
+            ) : tool.toolName === 'payBill' ? (
               <BotCard>
                 {/* @ts-expect-error */}
-                <Purchase props={tool.result} />
+                <BillConfirm props={tool.result} />
               </BotCard>
-            ) : tool.toolName === 'getEvents' ? (
+            ) : tool.toolName === 'getTransactionHistory' ? (
               <BotCard>
                 {/* @ts-expect-error */}
-                <Events props={tool.result} />
+                <TransactionHistory props={tool.result} />
               </BotCard>
             ) : null
           })
