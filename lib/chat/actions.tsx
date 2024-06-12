@@ -139,8 +139,8 @@ async function submitUserMessage(content: string) {
     
     If the user requests sending money, you should ask for their confirmation. call \`send_money\` to show the confirmation UI.
     If the user requests paying a bill, call \`pay_bill\` to show the pay bill UI.
-    If you want to show the user's account balance, call \`get_balance\`.
-    If you want to show the user's transaction history, call \`get_transaction_history\`.
+    If the user requests account balance, call \`get_balance\`.
+    If the user requests transaction history, call \`get_transaction_history\`.
     If the user wants to create a loan or complete another impossible task, respond that you are a demo and cannot do that.
 
     Here are some assumptions that must be followed:
@@ -183,7 +183,7 @@ async function submitUserMessage(content: string) {
     },
     tools: {
       getBalance: {
-        description: `Show imaginary user's 2 accounts and their balances.`,
+        description: `Show imaginary user's 2 accounts and their balances. Use this if and only if the user explicitly requests for their account balance.`,
         parameters: z.object({
           accountsBalance: z.array(
             z.object({
