@@ -7,6 +7,7 @@ import { Providers } from '@/components/providers'
 import { TailwindIndicator } from '@/components/tailwind-indicator'
 import { Toaster } from '@/components/ui/sonner'
 import { cn } from '@/lib/utils'
+import { Analytics } from '@vercel/analytics/react'
 
 export const metadata = {
   metadataBase: process.env.VERCEL_URL
@@ -58,6 +59,8 @@ export default function RootLayout({ children }: RootLayoutProps) {
           </div>
           <TailwindIndicator />
         </Providers>
+
+        <Analytics />
       </body>
     </html>
   )
